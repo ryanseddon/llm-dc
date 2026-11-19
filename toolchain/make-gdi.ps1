@@ -1,0 +1,84 @@
+<#
+  make-gdi.ps1 - build a bootable Dreamcast GDI of our WinCE image,
+  using the *proven* Half-Life DC pipeline (HL-DC is itself a WinCE port):
+    - utils\ip.bin       : HL-DC's IP.BIN (bootfile field = 0WINCEOS.BIN)
+    - utils\buildgdi.exe : Sappharad's GDIBuilder (makes the high-density track 3)
+    - utils\Half-Life.GDI: the 3-track layout (1@0 data, 2@756 audio, 3@45000 data)
+  track03 (IP.BIN + ISO9660 with 0WINCEOS.BIN) is generated; the low-density
+  track01/track02 are standard filler we synthesize to match the GDI's LBAs.
+
+  Usage: powershell -File make-gdi.ps1 [-Image <0winceos.bin>] [-OutDir <dir>]
+#>
+param(
+  [string]$Image     = "$PSScriptRoot/../reference/0winceos.ours.bin",
+  [string]$OutDir    = "$PSScriptRoot/../reference/disc",
+  [string]$Utils     = "$PSScriptRoot/../utils",
+  [string]$ExtraData = "",   # optional folder whose contents go into \CD-ROM
+  [string]$IpBin     = "",
+  [string]$Runner    = "",
+  [switch]$Full              # default = sparse/gapped track (fast, ~MBs); -Full = full padded data track
+)
+$ErrorActionPreference = "Stop"
+$sec = 2352
+
+if (-not (Test-Path $Image))               { throw "image not found: $Image" }
+$buildgdi = Join-Path $Utils "buildgdi.exe"
+if (-not (Test-Path $buildgdi)){ throw "buildgdi.exe not found in $Utils" }
+if (-not $IpBin) {
+  $IpBin = Join-Path $PSScriptRoot "../vendor/wcesdk/tools/GDWorkshop/ip_drago.bin"
+}
+if (-not (Test-Path $IpBin))                 { throw "ip.bin not found: $IpBin" }
+
+function Convert-ToWinePath([string]$Path) {
+  if (-not $Runner) { return $Path }
+  if ($Path -match '^[A-Za-z]:[\\/]') { return ($Path -replace '/', '\') }
+  $full = [System.IO.Path]::GetFullPath($Path)
+  return "Z:" + ($full -replace '/', '\')
+}
+
+$data = Join-Path $OutDir "data"
+Remove-Item $OutDir -Recurse -Force -ErrorAction SilentlyContinue
+New-Item -ItemType Directory -Force -Path $data | Out-Null
+if ($ExtraData -ne "" -and (Test-Path $ExtraData)) {
+  Write-Host "Staging extra CD-ROM files from $ExtraData ..."
+  Copy-Item -Path (Join-Path $ExtraData "*") -Destination $data -Recurse -Force
+}
+# OUR OS image wins: copy it LAST so it overrides any 0WINCEOS.BIN in -ExtraData
+# (e.g. a real game's GDI ships its own OS, but we boot ours + the game's data).
+Copy-Item $Image (Join-Path $data "0WINCEOS.BIN") -Force
+$gdi = Join-Path $OutDir "disc.gdi"
+Copy-Item (Join-Path $Utils "Half-Life.GDI") $gdi -Force
+
+# track03+ = IP.BIN bootsector + ISO9660 (with 0WINCEOS.BIN), high density @45000.
+# -truncate: do NOT pad the data track to the full GD-ROM (~1.18 GB). buildgdi
+# instead emits the ISO metadata (track03 @45000) + the file data at its real high
+# LBA (a separate track04), skipping the empty gap between -> a ~5 MB disc (no
+# extra data) instead of 1.1 GB of mostly-zero padding. The Dreamcast loads the
+# resulting multi-track GDI fine; the file data still ends at the disc's end LBA.
+# Pass -Full for a FULL, contiguously-padded data track (large, ~1.1 GB; some loaders/GDEMU
+# prefer the non-gapped layout). Default (no -Full) emits the sparse/truncated track.
+$bgArgs = @('-data', $data, '-ip', $IpBin, '-output', $OutDir, '-gdi', $gdi, '-V', 'WINCE')
+if (-not $Full) { $bgArgs += '-truncate' }
+Write-Host ("buildgdi: {0} data track" -f ($(if ($Full) {'FULL padded'} else {'truncated (sparse)'})))
+if ($Runner) {
+  $wineArgs = @('-data', (Convert-ToWinePath $data), '-ip', (Convert-ToWinePath $IpBin),
+    '-output', (Convert-ToWinePath $OutDir), '-gdi', (Convert-ToWinePath $gdi), '-V', 'WINCE')
+  if (-not $Full) { $wineArgs += '-truncate' }
+  & $Runner (Convert-ToWinePath $buildgdi) @wineArgs | Out-Null
+} else {
+  & $buildgdi @bgArgs | Out-Null
+}
+if ($LASTEXITCODE -ne 0) { throw "buildgdi failed with exit code $LASTEXITCODE" }
+if (-not (Test-Path (Join-Path $OutDir "track03.bin"))) { throw "buildgdi did not produce track03.bin" }
+
+# Parse the GDI for the track1/2 LBAs, synthesize standard low-density filler.
+$lines = Get-Content $gdi
+$t1lba = [int]($lines[1].Split(' ')[1])      # track1 start LBA (0)
+$t2lba = [int]($lines[2].Split(' ')[1])      # track2 start LBA (756)
+$t1sectors = $t2lba - $t1lba                 # track1 length so it ends at track2
+[IO.File]::WriteAllBytes((Join-Path $OutDir "track01.bin"), (New-Object byte[] ($t1sectors * $sec)))
+[IO.File]::WriteAllBytes((Join-Path $OutDir "track02.raw"), (New-Object byte[] (300 * $sec)))   # ~4s silence
+
+Write-Host "GDI ready: $gdi"
+Get-ChildItem $OutDir -File | Select-Object Name,Length | Format-Table -Auto
+Write-Host "$gdi is ready to boot."

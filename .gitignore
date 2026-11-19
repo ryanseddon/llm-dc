@@ -1,0 +1,36 @@
+# --- our build OUTPUTS only (regenerated; not committed) ---
+# CMake build tree (modules, image work-dir, disc) - all regenerated
+build/
+build-html/
+reference/*.bin
+reference/kernel-obj/
+toolchain/smoke/
+build.log
+build.err
+
+# user's \CD-ROM drop folder (default -DEXTRADATA): keep the placeholder, ignore dropped files
+extradata/*
+!extradata/put_your_files_here.txt
+
+# --- editor / OS cruft ---
+Thumbs.db
+*.user
+
+# NOTE: vendor/ IS committed on purpose (leak source + SH toolchain) so the repo
+#       clones-and-builds offline. Only C:\wcedreamcast (the DC SDK) is external
+#       and fetched separately — see RESUME.md / toolchain\bootstrap.ps1.
+reference/disc/
+reference/disc-real/
+reference/*.iso
+reference/*.cdi
+reference/*.log
+reference/disc-gdi/
+utils/ip.bin
+
+# Microsoft cvdump (fetched, not vendored)
+vendor/sh-toolchain/bin/I386/cvdump.exe
+reference/coredll-obj/
+vendor/nt4-ref/
+reference/shell-obj/
+reference/driver-obj/
+reference/net-obj/
