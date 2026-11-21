@@ -1,118 +1,162 @@
-<h1 align="center">Windows CE Dreamcast Community Edition</h1>
+<h1 align="center">llm-dc — a tiny language model on Windows CE for Dreamcast</h1>
 
 <p align="center">
-  <img src="screens/dcshell/desktop.PNG" width="640" alt="DCWin desktop"><br>
-  <em>A real, windowed Windows&nbsp;CE desktop — running on a Sega Dreamcast.</em>
+  <img src="screens/dcwllm/dcwllm.png" width="760" alt="dcwllm generating a TinyStories story in a DCWin window next to Task Manager"><br>
+  <em>dcwllm.exe — a 260K-parameter Llama-2 — writing a story on the Dreamcast's SH-4,<br>
+  as an ordinary Windows CE process next to Task Manager.</em>
 </p>
 
 <p align="center">
   <img src="https://img.shields.io/badge/platform-Sega%20Dreamcast-orange">
-  <img src="https://img.shields.io/badge/CPU-SH--4-blue">
+  <img src="https://img.shields.io/badge/CPU-SH--4%20200MHz-blue">
   <img src="https://img.shields.io/badge/Windows%20CE-2.12-lightgrey">
-  <img src="https://img.shields.io/badge/build-CMake-green">
+  <img src="https://img.shields.io/badge/model-TinyStories%20260K-green">
 </p>
 
 ---
 
-The Dreamcast shipped a stripped-down Windows CE 2.12 that retail games booted into and never
-exposed. **Windows CE Dreamcast Community Edition** takes that same on-disc CE runtime and turns
-it into something you can actually *use*: a multitasking windowed desktop and an in-progress
-TCP/IP stack over the Broadband Adapter — all baked into a standard bootable Dreamcast disc.
+A complete, local inference path for the Dreamcast: the checkpoint and tokenizer live on the
+disc, `dcwllm.exe` loads them with plain Win32 CE file APIs, and a decoder-only Transformer
+generates text on the SH-4. No server, no companion process, no GPU compute — the model runs
+in the same kind of CE process as Calculator.
 
-It is **fully self-contained**: the SH-4 PE compiler and the entire CE image toolchain are
-vendored in this repo. One `cmake` invocation goes from source to a bootable `disc.gdi`. No
-Platform Builder, no SDK install, no CD key.
+This repo is the [`wince-dc`](https://github.com/ryanseddon/wince-dc) tree at the commit that
+added the LLM, kept as its own project so the model work can move independently of the OS.
 
-## Screenshots
+## The model
 
-| The desktop | Multitasking |
-|:---:|:---:|
-| <img src="screens/dcshell/desktop.PNG" width="380"> | <img src="screens/dcshell/windows.PNG" width="380"> |
-| Icons, Start menu, taskbar, mouse cursor | Task Manager, Explorer browsing the disc, a live Clock — each app its own process |
+`stories260K` — Karpathy's TinyStories checkpoint from [`llama2.c`](https://github.com/karpathy/llama2.c),
+in its 260K-parameter configuration.
 
-## Features
+| | |
+|---|---|
+| Architecture | Llama-2 (RMSNorm, RoPE, SwiGLU, GQA) |
+| Layers | 5 |
+| Width / FFN | `dim=64`, `hidden_dim=172` |
+| Heads | 8 query, 4 KV (grouped-query) |
+| Vocab / context | 512 tokens / 512 positions |
+| Weights | 1,056,540 bytes, fp32, single flat blob |
+| Sampling | greedy (`temperature=0`), `top_p=0.9`, fixed seed |
+| Tokens per run | 64 |
 
-- **DCWin desktop shell** — a windowed, multitasking desktop composited on the PVR2 /
-  Direct3D: move / resize / minimize / maximize windows, a Start button, taskbar, and a mouse
-  cursor. Every app runs in its own CE process.
-- **Built-in apps** — Explorer (browse `\`, `\Windows`, `\CD-ROM`; launch binaries), Task
-  Manager (live process + RAM view), Clock, Calculator, a memory tester, and a winsock network
-  tester.
-- **Networking over the stock CE stack** *(work in progress)* — a universal link shim
-  (`mppp.dll`) aims to let the stock `microstk.exe` + `winsock.dll` run over **Ethernet**
-  instead of dial-up PPP, with DHCP/ARP/DNS handled in the shim (DHCP option-6 → the
-  Dreamcast's own flash ISP config → a public resolver). Both link backends — the **Broadband
-  Adapter** and a **W5500/MACRAW over SPI** transport — are still being brought up and not yet
-  working end-to-end.
-- **Self-contained CMake build** — vendored SH-4 `cl.exe` + the CE image tools (`makeimg`,
-  `romimage`, …). Produces **retail** (silent) or **debug** (serial console) images, and a
-  standard bootable GDI.
+Generation is **one transformer step per UI frame**: the window repaints between tokens instead
+of blocking on a `generate()` loop. Push Go and the desktop stays live — drag the window, open
+Task Manager, watch `dcwllm.exe` tick along at ~10 tokens/sec.
 
-## Building
+## Running it
 
-**Prerequisites:** CMake ≥ 3.20 and a generator (Ninja). The pair bundled with Visual Studio
-works out of the box — nothing else from VS is used. PowerShell is used for the disc-imaging
-steps (Windows host).
+### 1. Model files
 
-```sh
-# configure (point -DCMAKE_MAKE_PROGRAM at ninja if it isn't on PATH)
-cmake -G Ninja -S . -B build
+The checkpoint and tokenizer are **not in this repo** (`extradata/*` is gitignored — the blob is
+third-party model data). Download them from the `llama2.c` / `esp32-llm` data folders:
 
-# 1) just the SH-4 modules -> build/modules/  (dcspi.dll, mppp.dll, dcshell.exe, dcw* apps)
-cmake --build build
+| File | What | Size |
+|---|---|---|
+| `stories260K.bin` | fp32 checkpoint (header + weights) | 1,056,540 B |
+| `tok512.bin` | 512-entry BPE vocabulary + scores | 6,227 B |
 
-# 2) the bootable OS image -> build/0winceos.bin
-cmake --build build --target image
+Drop both into [`extradata/`](extradata/). Everything in that folder is copied to the disc's
+`\CD-ROM` by the `gdi` target, which is where `dcwllm.exe` looks for them.
 
-# 3) the full chain -> build/disc/disc.gdi
-cmake --build build --target gdi
-```
+### 2. Build
 
-### Build options
-
-| Option | Default | Effect |
-|--------|---------|--------|
-| `-DKERNEL=retail\|debug` | `retail` | `retail` = the silent kernel. `debug` = the SCIF serial-console kernel. Changes boot logging only. |
-| `-DDLLS=retail\|debug` | `retail` | `retail` = the stock OS DLLs (what real games run on). `debug` = the checked (assert-heavy) DLLs; these break some titles (e.g. DirectDraw/DDHAL), so leave this `retail` unless you're chasing a system-DLL bug. |
-| `-DAUTORUN=<exe>` | `dcshell.exe` | The program launched at boot (`HKLM\init` `Autorun`). Use forward slashes for a path, e.g. `-DAUTORUN=/CD-ROM/DC.EXE` to autostart a disc binary. |
-| `-DEXTRADATA=<dir>` | *(none)* | Folder whose contents are placed in the disc's `\CD-ROM` (e.g. a game's files). Relative paths resolve against the repo root; our OS image always wins for `0WINCEOS.BIN`. |
+The whole toolchain is vendored — the SH-4 `cl.exe` and the CE image tools run under Wine on
+Linux (or natively on Windows). Requires CMake ≥ 3.20, Ninja, `wine` and `pwsh`.
 
 ```sh
-# example: a SCIF serial-console image (over the working retail DLLs) with a game on the disc
-cmake -S . -B build -DKERNEL=debug -DEXTRADATA=path/to/game
-cmake --build build --target gdi
+cmake -G Ninja -S . -B build -DAUTORUN="dcshell.exe -auto-llm"
+cmake --build build --target gdi       # modules -> NK.bin -> 0winceos.bin -> disc.gdi
 ```
 
-## Running
+`-DAUTORUN="dcshell.exe -auto-llm"` boots straight to the desktop and opens the LLM side by side
+with Task Manager. Without it the image boots the stock `dcwboot.exe` menu and you launch the LLM
+from its desktop icon.
 
-The build produces a standard multi-track **`build/disc/disc.gdi`** that boots on real Dreamcast
-hardware:
+Want just the executable? `cmake --build build --target dcwllm` produces
+`build/modules/dcwllm.exe`.
 
-- **GDEMU / MODE / USB-GD-ROM** — copy the `disc.gdi` + its track files onto the SD card / image
-  and select it from the menu.
-- **Burned disc** — for a GD-R / GDEMU-exact layout, use `toolchain/make-gdi-real.ps1` to
-  rebuild against a real CE-game GDI (matches the original IP.BIN + track geometry).
+### 3. Boot it
 
-The default image boots straight to the DCWin desktop. For diagnostics, build with
-`-DKERNEL=debug` and watch the Dreamcast serial (SCIF) console.
+`build/disc/disc.gdi` is a standard multi-track Dreamcast disc:
 
-## Repository layout
+- **Flycast / RetroArch** — load `disc.gdi` directly.
+- **GDEMU / MODE / USB-GD-ROM** — copy `disc.gdi` plus its tracks to the SD card.
+- **Hardware** — burn it, or use `toolchain/make-gdi-real.ps1` for a GD-R exact layout.
+
+Type with the on-screen keyboard (D-pad + A/Enter, or the analog pointer), or just hammer keys on
+the emulator's keyboard. Press **Go** with an empty prompt and the model rambles from scratch.
+
+## How it works
+
+```
+prompt ──BPE──> tokens ──forward()──> logits ──sample──> token ──decode──> output buffer
+                            ▲                                                   │
+                            └────────── one token per DCWin frame ──────────────┘
+```
+
+Nothing in the stock CE kernel or network stack knows about language models. The app is layered
+the same way every other DCWin app is:
+
+| Layer | Where |
+|---|---|
+| Desktop | `shell/dcshell.c` — LLM icon, `-auto-llm` launch, side-by-side placement |
+| Client | `shell/dcwlib.c` — `DCWinOpen`, frame submission, key/pointer ring, crash wrapper |
+| App | `shell/dcwllm.c` — prompt field, OSK, Go/Clear, frame-driven decoding, t/s status |
+| Inference | `llm/llm.c`, `llm/llm.h` — checkpoint load, BPE, forward pass, sampling |
+| Runtime | CE heap, `CreateFileW`/`ReadFile`, `FloatMath.lib` |
+
+### What CE 2.12 forced
+
+- **Wide file APIs.** `CreateFileW` + `ReadFile` instead of `fopen` — CE's ANSI file layer is
+  unreliable for `\CD-ROM` paths.
+- **No `calloc`, no `bsearch`.** Both are shimmed locally.
+- **Soft float.** `expf`/`sinf`/`cosf`/`sqrtf`/`powf` map onto `FloatMath.lib`'s `exps`/`sins`/…
+- **No `mmap`.** The 1 MB blob is read straight into heap.
+- **No `__attribute__((aligned))`.** llama2.c's `v4sf` vector type collapses to plain `float`;
+  the ABI of the blob is unchanged.
+
+## Performance
+
+Measured on the status line (`<state> <pos>/<steps> tok <n> t/s`):
+
+| Path | Speed | Notes |
+|---|---|---|
+| Scalar C matmul (this commit) | ~10.5 tok/s | 4-way unrolled inner loop, soft-float target |
+| SH-4 `FTRV` assembly kernel | ~14.8 tok/s | experimental, not in this snapshot — see roadmap |
+
+Flycast's JIT is not cycle-accurate, so treat these as relative figures rather than a hardware
+benchmark. Memory is the harder constraint than throughput: ~1.03 MB of weights plus ~640 KB of
+KV cache (`2 × layers × seq_len × kv_dim × 4 B`) inside a 16 MB console, alongside CE, the
+compositor and the rest of the desktop.
+
+## Source map
 
 | Path | What |
-|------|------|
-| `CMakeLists.txt`, `cmake/` | the entire build (modules → image → GDI) |
-| `shell/` | the DCWin desktop shell, PVR2/D3D compositor, and the client apps |
-| `net/netif/` | the universal `mppp.dll` link shim (BBA + W5500 backends, DHCP/ARP/DNS) |
-| `drivers/dcspi/` | reusable SPI transport (SCI hardware-SPI + SCIF bit-bang) for the W5500 |
-| `toolchain/` | `wrap-image.ps1` / `make-gdi.ps1` / `make-gdi-real.ps1` + the build README |
-| `vendor/sh-toolchain/` | the SH-4 PE compiler + CE headers |
-| `vendor/wcesdk/` | the vendored CE 2.12 SDK: headers, libs, image tools, OS modules, kernels |
+|---|---|
+| `llm/llm.c` | checkpoint/tokenizer loading, BPE, `forward()`, sampler |
+| `llm/llm.h` | config, weights, run state, tokenizer, sampler types |
+| `shell/dcwllm.c` | the CE application: UI + frame-paced generation |
+| `shell/dcwlib.c` | DCWin client library used by every `dcw*` app |
+| `CMakeLists.txt` | `dcwllm` target (links `coredll`, `corelibc`, `FloatMath`) |
+| `vendor/wcesdk/image/platform.bib` | places `dcwllm.exe` in the CE ROM image |
+| `extradata/` | disc drop folder — put the model files here |
 
-See [`toolchain/README.md`](toolchain/README.md) for build internals.
+## Roadmap
 
-## Notes
+- **Phase 1 (done)** — scalar, correct inference, interactive UI, frame-paced decoding.
+- **Phase 2** — hand-written SH-4 `FTRV`/`FIPR` matmul kernels (`shasm.exe` dialect, not GCC
+  asm). Prototypes ran but produced wrong logits; the target is ~3–5× over scalar.
+- Bigger checkpoints (TinyStories 1M/3M) once the KV cache fits comfortably.
+- Prompt presets on the OSK, so a demo does not need typing.
 
-This project builds on the Sega "Dragon" Windows CE for Dreamcast SDK (vendored). The shell,
-networking shim, and SPI driver are original work; the CE kernel and system modules are the
-stock SDK binaries. Don't redistribute the vendored SDK binaries outside the spirit of this
-research project.
+## Provenance
+
+- `llm/llm.c`, `llm/llm.h` — port of [`esp32-llm`](https://github.com/DaveBben/esp32-llm)'s
+  `llm.c`, itself derived from Karpathy's [`llama2.c`](https://github.com/karpathy/llama2.c). The
+  FreeRTOS dual-core path, the Xtensa dot-product intrinsics and the mmap shim are stripped.
+- Everything else (DCWin shell, compositor, image pipeline) is from `wince-dc`; the vendored
+  Sega "Dragon" CE 2.12 SDK binaries are research material — don't redistribute them.
+- This repo is the whole `wince-dc` tree, not a pruned fork: `shell/`, `net/`, `drivers/` and the
+  vendored toolchain are still here because the LLM app needs the shell, the DCWin client library
+  and the image pipeline to run. The OS itself lives at
+  [`ryanseddon/wince-dc`](https://github.com/ryanseddon/wince-dc).
