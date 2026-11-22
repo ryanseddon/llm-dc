@@ -23,6 +23,12 @@ in the same kind of CE process as Calculator.
 This repo is the [`wince-dc`](https://github.com/ryanseddon/wince-dc) tree at the commit that
 added the LLM, kept as its own project so the model work can move independently of the OS.
 
+<p align="center">
+  <img src="screens/dcwllm/dcwllm.gif" width="760" alt="Tokens appearing one per frame in the dcwllm window"><br>
+  <em>Push Go and it writes — one transformer step per frame, ~10 tokens/sec.<br>
+  <a href="screens/dcwllm/dcwllm.mp4">Full-quality MP4</a> (same clip, H.264).</em>
+</p>
+
 ## The model
 
 `stories260K` — Karpathy's TinyStories checkpoint from [`llama2.c`](https://github.com/karpathy/llama2.c),
